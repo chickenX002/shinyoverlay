@@ -47,28 +47,35 @@ state_lock = threading.Lock()
 POKEAPI = "https://pokeapi.co/api/v2/pokemon/{}"
 
 def fetch_pokemon(name: str):
-    """Fetch shiny sprite URL + proper display name from PokéAPI."""
+    """Fetch shiny sprite URL + proper display name from PokéAPI.
+    Retries up to 4 times on transient network errors."""
+    import time
     name = name.strip().lower().replace(" ", "-")
-    try:
-        r = req.get(POKEAPI.format(name), timeout=8)
-        r.raise_for_status()
-        data = r.json()
-        sprite = (
-            data["sprites"].get("other", {})
-                           .get("official-artwork", {})
-                           .get("front_shiny")
-            or data["sprites"].get("front_shiny")
-            or data["sprites"].get("front_default")
-            or ""
-        )
-        display = data["name"].replace("-", " ").title()
-        return sprite, display, ""
-    except req.HTTPError as e:
-        if e.response.status_code == 404:
-            return "", "", f"Pokémon '{name}' not found."
-        return "", "", f"HTTP {e.response.status_code}"
-    except Exception as e:
-        return "", "", str(e)
+    last_err = ""
+    for attempt in range(4):
+        try:
+            r = req.get(POKEAPI.format(name), timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            sprite = (
+                data["sprites"].get("other", {})
+                               .get("official-artwork", {})
+                               .get("front_shiny")
+                or data["sprites"].get("front_shiny")
+                or data["sprites"].get("front_default")
+                or ""
+            )
+            display = data["name"].replace("-", " ").title()
+            return sprite, display, ""
+        except req.HTTPError as e:
+            if e.response.status_code == 404:
+                return "", "", f"Pokémon '{name}' not found."
+            last_err = f"HTTP {e.response.status_code}"
+        except Exception as e:
+            last_err = str(e)
+        if attempt < 3:
+            time.sleep(2 ** attempt)
+    return "", "", last_err
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -134,14 +141,20 @@ def logout():
     session.clear()
     return redirect(url_for("config_panel"))
 
-# ── Preload default pokemon on startup ───────────────────────────────────────
+# ── Preload default pokemon on startup (with retry) ──────────────────────────
 def preload():
-    sprite, display, err = fetch_pokemon("charizard")
-    with state_lock:
+    import time
+    for attempt in range(5):
+        sprite, display, err = fetch_pokemon("charizard")
         if sprite:
-            state["sprite_url"]   = sprite
-            state["display_name"] = display
-        state["error"] = err
+            with state_lock:
+                state["sprite_url"]   = sprite
+                state["display_name"] = display
+                state["error"]        = ""
+            return
+        time.sleep(2 ** (attempt + 1))
+    with state_lock:
+        state["error"] = err or "Failed to load default Pokémon after retries."
 
 threading.Thread(target=preload, daemon=True).start()
 
@@ -584,18 +597,41 @@ function copyUrl() {
   setTimeout(()=>{btn.textContent='Copy';btn.style.color=''},1500);
 }
 
-// ── Status poller ─────────────────────────────────────────────────────────
+// ── Status poller — retries until sprite is ready ────────────────────────
 async function pollStatus() {
   try {
-    const s = await fetch('/api/state').then(r=>r.json());
+    const s = await fetch('/api/state', {cache: 'no-store'});
+    if (!s.ok) throw new Error('bad');
+    const data = await s.json();
+
+    if (!data.sprite_url) {
+      // PokéAPI still loading — show spinner and retry quickly
+      document.getElementById('status_dot').className = 'dot';
+      document.getElementById('status_text').textContent = '⏳ Loading sprite…';
+      setTimeout(pollStatus, 2000);
+      return;
+    }
+
+    // Update status bar
     document.getElementById('status_dot').className = 'dot ok';
     document.getElementById('status_text').textContent =
-      s.error ? '⚠ '+s.error : '✓ '+s.display_name+' loaded';
+      data.error ? '⚠ '+data.error : '✓ '+data.display_name+' loaded';
+
+    // Update preview sprite + name if they changed
+    const sprite = document.getElementById('ov_sprite');
+    if (data.sprite_url && sprite.src !== data.sprite_url) {
+      sprite.style.opacity = '0';
+      sprite.src = data.sprite_url;
+      sprite.onload = () => { sprite.style.transition='opacity .4s'; sprite.style.opacity='1'; };
+    }
+    document.getElementById('ov_name').textContent = data.display_name || '';
+
+    setTimeout(pollStatus, 5000);
   } catch(_) {
     document.getElementById('status_dot').className = 'dot';
     document.getElementById('status_text').textContent = 'Disconnected';
+    setTimeout(pollStatus, 3000);
   }
-  setTimeout(pollStatus, 5000);
 }
 
 updatePreview();
@@ -691,9 +727,27 @@ function applyState(s) {
   tag.style.color   = s.glow_color || '#f5c518';
 }
 
+let _ready = false;
+
 async function poll() {
-  try { applyState(await fetch('/api/state').then(r=>r.json())); } catch(_){}
-  setTimeout(poll, 4000);
+  try {
+    const r = await fetch('/api/state', {cache: 'no-store'});
+    if (!r.ok) throw new Error('bad response');
+    const s = await r.json();
+
+    if (!s.sprite_url) {
+      // Server is up but sprite not loaded yet — retry quickly
+      setTimeout(poll, 2000);
+      return;
+    }
+
+    applyState(s);
+    _ready = true;
+    setTimeout(poll, 4000);
+  } catch(_) {
+    // Network hiccup — retry in 3s
+    setTimeout(poll, 3000);
+  }
 }
 poll();
 </script>
