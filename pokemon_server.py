@@ -557,7 +557,7 @@ input:checked+.slider:before{transform:translateX(18px)}
         {% if slot.loading %}
           <div style="margin-top:20px" class="slot-loading">loading…</div>
         {% elif slot.sprite_url %}
-          <img src="{{ slot.sprite_url }}" alt="{{ slot.display_name }}"/>
+          <img src="{{ slot.sprite_url }}" alt="{{ slot.display_name }}" style="pointer-events:none"/>
           <span class="slot-name">{{ slot.display_name }}</span>
         {% elif slot.error %}
           <div class="slot-empty">❌</div>
@@ -579,9 +579,14 @@ input:checked+.slider:before{transform:translateX(18px)}
         <button class="clear-btn"  onclick="clearSlot()" title="Clear slot">✕</button>
       </div>
       <div class="search-result" id="search-result"></div>
-      <button class="set-active-btn" id="set-active-btn" onclick="setActive()">
-        SET AS ACTIVE (SHOW ON OVERLAY)
-      </button>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button id="shiny-btn" onclick="toggleShiny()"
+          style="flex:1;padding:9px 8px;background:transparent;border:2px solid #a78bfa;
+          border-radius:9px;color:#a78bfa;font-family:'Press Start 2P',monospace;font-size:7px;
+          cursor:pointer;transition:all .2s;letter-spacing:.05em">✨ SHINY</button>
+        <button class="set-active-btn" id="set-active-btn" onclick="setActive()"
+          style="flex:2;margin-top:0;padding:9px 8px">SET AS ACTIVE</button>
+      </div>
     </div>
   </div>
 
@@ -815,7 +820,7 @@ function refreshSlotUI(i, slot) {
     <span class="slot-num">${i+1}</span>
     ${isAir ? '<span class="air-badge">ON AIR</span>' : ''}
     ${slot.sprite_url
-      ? `<img src="${slot.sprite_url}" alt="${slot.display_name}"/><span class="slot-name">${slot.display_name}</span><span class="shiny-badge">${slot.shiny !== false ? '✨' : '⬤'}</span>`
+      ? `<img src="${slot.sprite_url}" alt="${slot.display_name}" style="pointer-events:none"/><span class="slot-name" style="pointer-events:none">${slot.display_name}</span><span class="shiny-badge" style="pointer-events:none">${slot.shiny !== false ? '✨' : '⬤'}</span>`
       : slot.error
         ? `<div class="slot-empty">❌</div><span class="slot-err">${slot.error.slice(0,28)}</span>`
         : `<div class="slot-empty">＋</div><span class="slot-name" style="color:var(--muted)">empty</span>`}
@@ -832,6 +837,48 @@ async function setActive() {
   slotsData.forEach((_,i) => refreshSlotUI(i, slotsData[i]));
   selectSlot(selectedSlot);
   updatePreviewSprite(slotsData[activeSlot]);
+}
+
+async function toggleShiny() {
+  const res = document.getElementById('search-result');
+  const slot = slotsData[selectedSlot];
+  if (!slot || !slot.sprite_url_shiny) {
+    res.className = 'search-result err';
+    res.textContent = '✗ Load a Pokémon first.';
+    return;
+  }
+  try {
+    const r = await fetch('/api/toggle_shiny', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slot: selectedSlot})
+    });
+    const data = await r.json();
+    if (data.error) { res.className='search-result err'; res.textContent='✗ '+data.error; return; }
+    slotsData[selectedSlot].shiny = data.shiny;
+    slotsData[selectedSlot].sprite_url = data.sprite_url;
+    res.className = 'search-result ok';
+    res.textContent = data.shiny ? '✨ Switched to SHINY' : '⬤ Switched to NORMAL';
+    updateShinyBtn(data.shiny);
+    refreshSlotUI(selectedSlot, slotsData[selectedSlot]);
+    if (selectedSlot === activeSlot) updatePreviewSprite(slotsData[activeSlot]);
+  } catch(e) { res.className='search-result err'; res.textContent='✗ '+e; }
+}
+
+function updateShinyBtn(isShiny) {
+  const btn = document.getElementById('shiny-btn');
+  if (!btn) return;
+  if (isShiny) {
+    btn.textContent = '✨ SHINY';
+    btn.style.borderColor = '#a78bfa';
+    btn.style.color = '#a78bfa';
+    btn.style.background = '#a78bfa15';
+  } else {
+    btn.textContent = '⬤ NORMAL';
+    btn.style.borderColor = '#6b7280';
+    btn.style.color = '#9ca3af';
+    btn.style.background = 'transparent';
+  }
 }
 
 async function clearSlot() {
