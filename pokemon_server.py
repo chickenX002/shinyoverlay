@@ -32,7 +32,7 @@ MAX_SLOTS = 10
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 def empty_slot():
-    return {"name": "", "display_name": "", "sprite_url": "", "loading": False, "error": ""}
+    return {"name": "", "display_name": "", "sprite_url": "", "sprite_url_normal": "", "shiny": True, "loading": False, "error": ""}
 
 state = {
     "slots":          [empty_slot() for _ in range(MAX_SLOTS)],
@@ -112,39 +112,36 @@ def fetch_pokemon(name: str):
             r = req.get(POKEAPI.format(name), timeout=10)
             r.raise_for_status()
             data = r.json()
-            sprite = (
-                data["sprites"].get("other", {})
-                               .get("official-artwork", {})
-                               .get("front_shiny")
-                or data["sprites"].get("front_shiny")
-                or data["sprites"].get("front_default")
-                or ""
-            )
+            oa = data["sprites"].get("other", {}).get("official-artwork", {})
+            sprite_shiny  = oa.get("front_shiny")  or data["sprites"].get("front_shiny")  or data["sprites"].get("front_default") or ""
+            sprite_normal = oa.get("front_default") or data["sprites"].get("front_default") or sprite_shiny
             display = data["name"].replace("-", " ").title()
-            return sprite, display, ""
+            return sprite_shiny, sprite_normal, display, ""
         except req.HTTPError as e:
             if e.response.status_code == 404:
-                return "", "", f"'{name}' not found."
+                return "", "", "", f"\'{name}\' not found."
             last_err = f"HTTP {e.response.status_code}"
         except Exception as e:
             last_err = str(e)
         if attempt < 3:
             time.sleep(2 ** attempt)
-    return "", "", last_err
+    return "", "", "", last_err
 
 def fetch_slot_bg(slot_index: int, name: str):
     with state_lock:
         state["slots"][slot_index]["loading"] = True
         state["slots"][slot_index]["error"]   = ""
-    sprite, display, err = fetch_pokemon(name)
+    sprite_shiny, sprite_normal, display, err = fetch_pokemon(name)
     with state_lock:
         s = state["slots"][slot_index]
         s["loading"] = False
-        if sprite:
-            s["sprite_url"]   = sprite
-            s["display_name"] = display
-            s["error"]        = ""
-            # If this is the first filled slot, make it active
+        if sprite_shiny or sprite_normal:
+            shiny = s.get("shiny", True)
+            s["sprite_url"]        = sprite_shiny if shiny else sprite_normal
+            s["sprite_url_shiny"]  = sprite_shiny
+            s["sprite_url_normal"] = sprite_normal
+            s["display_name"]      = display
+            s["error"]             = ""
             if not any(sl["sprite_url"] for idx, sl in enumerate(state["slots"]) if idx != slot_index):
                 state["active_slot"] = slot_index
         else:
@@ -192,6 +189,23 @@ def api_config():
             if key in data:
                 state[key] = data[key]
     return jsonify({"ok": True})
+
+@app.route("/api/toggle_shiny", methods=["POST"])
+def api_toggle_shiny():
+    if not session.get("authed"):
+        if request.headers.get("X-Overlay-Password") != ADMIN_PASSWORD:
+            return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(force=True)
+    slot = int(data.get("slot", 0))
+    if not (0 <= slot < MAX_SLOTS):
+        return jsonify({"error": "Invalid slot"}), 400
+    with state_lock:
+        s = state["slots"][slot]
+        if not s.get("sprite_url_shiny"):
+            return jsonify({"error": "No sprite loaded for this slot."}), 400
+        s["shiny"] = not s.get("shiny", True)
+        s["sprite_url"] = s["sprite_url_shiny"] if s["shiny"] else s["sprite_url_normal"]
+        return jsonify({"ok": True, "shiny": s["shiny"], "sprite_url": s["sprite_url"]})
 
 @app.route("/api/rotation", methods=["POST"])
 def api_rotation():
@@ -749,6 +763,7 @@ function selectSlot(i) {
   const btn = document.getElementById('set-active-btn');
   btn.textContent = i === activeSlot ? 'CURRENTLY ON AIR ✓' : 'SET AS ACTIVE (SHOW ON OVERLAY)';
   btn.className = 'set-active-btn' + (i === activeSlot ? ' is-active' : '');
+  updateShinyBtn(slotsData[i].shiny !== false);
 }
 
 async function fetchSlot() {
@@ -800,7 +815,7 @@ function refreshSlotUI(i, slot) {
     <span class="slot-num">${i+1}</span>
     ${isAir ? '<span class="air-badge">ON AIR</span>' : ''}
     ${slot.sprite_url
-      ? `<img src="${slot.sprite_url}" alt="${slot.display_name}"/><span class="slot-name">${slot.display_name}</span>`
+      ? `<img src="${slot.sprite_url}" alt="${slot.display_name}"/><span class="slot-name">${slot.display_name}</span><span class="shiny-badge">${slot.shiny !== false ? '✨' : '⬤'}</span>`
       : slot.error
         ? `<div class="slot-empty">❌</div><span class="slot-err">${slot.error.slice(0,28)}</span>`
         : `<div class="slot-empty">＋</div><span class="slot-name" style="color:var(--muted)">empty</span>`}
@@ -1009,7 +1024,8 @@ function applyState(s) {
   nameEl.style.color    = s.name_color || '#f5c518';
   nameEl.style.textShadow = `0 0 ${s.glow_strength ?? 12}px ${s.glow_color || '#f5c518'}`;
 
-  document.getElementById('tag').style.display = s.show_shiny_tag ? '' : 'none';
+  const showTag = s.show_shiny_tag && (active.shiny !== false);
+  document.getElementById('tag').style.display = showTag ? '' : 'none';
   document.getElementById('tag').style.color   = s.glow_color || '#f5c518';
 }
 
