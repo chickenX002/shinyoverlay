@@ -13,7 +13,7 @@ Routes:
   /api/rotation    → POST {"action":"start"|"stop"|"next"|"prev"|"set_interval","interval":40}
 
 Requirements:  pip install flask requests
-Password:      OVERLAY_PASSWORD=yourpass python pokemon_server.py  (default: admin123)
+Password:      OVERLAY_PASSWORD=yourpass python pokemon_server.py  (default: shiny123)
 """
 
 from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for
@@ -26,7 +26,7 @@ import os
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "pkmn-secret-change-me")
 
-ADMIN_PASSWORD = os.environ.get("OVERLAY_PASSWORD", "admin123")
+ADMIN_PASSWORD = os.environ.get("OVERLAY_PASSWORD", "shiny123")
 PORT = int(os.environ.get("PORT", os.environ.get("OVERLAY_PORT", 5051)))
 MAX_SLOTS = 10
 
