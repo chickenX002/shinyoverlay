@@ -11,9 +11,10 @@ Routes:
   /api/config      → POST settings
   /api/fetch       → POST {"slot":0,"name":"pikachu"} – load a slot
   /api/rotation    → POST {"action":"start"|"stop"|"next"|"prev"|"set_interval","interval":40}
+  /visitors        → Visitor log by country (password protected)
 
 Requirements:  pip install flask requests
-Password:      OVERLAY_PASSWORD=yourpass python pokemon_server.py  (default: shiny123)
+Password:      OVERLAY_PASSWORD=yourpass python pokemon_server.py  (default: admin123)
 """
 
 from flask import Flask, jsonify, render_template_string, request, session, redirect, url_for
@@ -22,6 +23,8 @@ import threading
 import time
 import copy
 import os
+import collections
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "pkmn-secret-change-me")
@@ -29,6 +32,52 @@ app.secret_key = os.environ.get("SECRET_KEY", "pkmn-secret-change-me")
 ADMIN_PASSWORD = os.environ.get("OVERLAY_PASSWORD", "shiny123")
 PORT = int(os.environ.get("PORT", os.environ.get("OVERLAY_PORT", 5051)))
 MAX_SLOTS = 10
+
+# ── Visitor log ───────────────────────────────────────────────────────────────
+visitor_log  = collections.deque(maxlen=200)   # last 200 visits
+visitor_lock = threading.Lock()
+_ip_cache    = {}   # cache country lookups so we don't spam ip-api.com
+_ip_cache_lock = threading.Lock()
+
+SKIP_PATHS = {"/api/state", "/api/config", "/api/fetch",
+              "/api/rotation", "/api/toggle_shiny", "/static"}
+
+def get_country(ip: str) -> str:
+    """Return country name for an IP using free ip-api.com (no key needed)."""
+    if ip in ("127.0.0.1", "::1"):
+        return "Localhost"
+    with _ip_cache_lock:
+        if ip in _ip_cache:
+            return _ip_cache[ip]
+    try:
+        r = req.get(f"http://ip-api.com/json/{ip}?fields=country,countryCode",
+                    timeout=4)
+        data = r.json()
+        country = data.get("country", "Unknown")
+    except Exception:
+        country = "Unknown"
+    with _ip_cache_lock:
+        _ip_cache[ip] = country
+    return country
+
+def log_visitor_bg(ip: str, path: str):
+    country = get_country(ip)
+    entry = {
+        "ip":      ip,
+        "country": country,
+        "path":    path,
+        "time":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    }
+    with visitor_lock:
+        visitor_log.appendleft(entry)
+
+@app.before_request
+def track_visitor():
+    path = request.path
+    if any(path.startswith(p) for p in SKIP_PATHS):
+        return   # skip API polling calls
+    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+    threading.Thread(target=log_visitor_bg, args=(ip, path), daemon=True).start()
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 def empty_slot():
@@ -269,6 +318,14 @@ def logout():
     session.clear()
     return redirect(url_for("config_panel"))
 
+@app.route("/visitors")
+def visitors():
+    if not session.get("authed"):
+        return redirect(url_for("config_panel"))
+    with visitor_lock:
+        log = list(visitor_log)
+    return render_template_string(VISITORS_HTML, log=log)
+
 # ── Preload Charizard into slot 0 ─────────────────────────────────────────────
 def preload():
     with state_lock:
@@ -276,6 +333,171 @@ def preload():
     fetch_slot_bg(0, "charizard")
 
 threading.Thread(target=preload, daemon=True).start()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VISITORS HTML
+# ─────────────────────────────────────────────────────────────────────────────
+VISITORS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Visitor Log</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d0f1a;--card:#12151f;--border:#222840;--text:#e2eaf0;--muted:#4b6070;--accent:#f5c518}
+body{background:var(--bg);min-height:100vh;font-family:'DM Sans',sans-serif;color:var(--text);
+  padding:24px;
+  background-image:radial-gradient(ellipse at 80% 10%,#f5c51810 0%,transparent 45%)}
+
+.topbar{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:28px;max-width:900px;margin-left:auto;margin-right:auto}
+.brand{font-family:'Press Start 2P',monospace;font-size:9px;color:var(--accent)}
+.nav{display:flex;gap:10px}
+.nav a{font-size:12px;color:var(--muted);text-decoration:none;
+  border:1px solid var(--border);padding:6px 14px;border-radius:8px;transition:all .2s}
+.nav a:hover{color:var(--text);border-color:#f5c51860}
+
+.wrap{max-width:900px;margin:0 auto}
+
+/* ── Stats row ── */
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px}
+.stat-val{font-family:'Press Start 2P',monospace;font-size:20px;color:var(--accent);margin-bottom:6px}
+.stat-lbl{font-size:12px;color:var(--muted)}
+
+/* ── Country breakdown ── */
+.section-title{font-family:'Press Start 2P',monospace;font-size:8px;color:var(--accent);
+  letter-spacing:.12em;margin-bottom:12px}
+.countries{background:var(--card);border:1px solid var(--border);border-radius:14px;
+  padding:20px;margin-bottom:20px}
+.country-row{display:flex;align-items:center;gap:12px;padding:8px 0;
+  border-bottom:1px solid var(--border)}
+.country-row:last-child{border-bottom:none}
+.country-flag{font-size:20px;width:28px;text-align:center}
+.country-name{flex:1;font-size:13px;font-weight:500}
+.country-bar-wrap{width:160px;height:6px;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden}
+.country-bar{height:100%;border-radius:99px;background:var(--accent);transition:width .6s}
+.country-count{font-family:'Press Start 2P',monospace;font-size:9px;color:var(--accent);
+  min-width:40px;text-align:right}
+
+/* ── Log table ── */
+.log-card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden}
+.log-header{display:grid;grid-template-columns:160px 1fr 140px;gap:0;
+  padding:12px 20px;background:#181c2a;border-bottom:1px solid var(--border)}
+.log-header span{font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.log-row{display:grid;grid-template-columns:160px 1fr 140px;gap:0;
+  padding:11px 20px;border-bottom:1px solid var(--border);transition:background .15s}
+.log-row:last-child{border-bottom:none}
+.log-row:hover{background:#181c2a}
+.log-time{font-family:'Courier New',monospace;font-size:11px;color:var(--muted)}
+.log-country{font-size:13px;display:flex;align-items:center;gap:8px}
+.log-page{font-size:12px;color:var(--muted);font-family:'Courier New',monospace}
+.page-overlay{color:#34d399}
+.page-config{color:#60a5fa}
+.badge{display:inline-block;font-size:10px;padding:2px 8px;border-radius:4px;font-weight:600}
+.badge-overlay{background:#34d39920;color:#34d399;border:1px solid #34d39940}
+.badge-config{background:#60a5fa20;color:#60a5fa;border:1px solid #60a5fa40}
+.badge-other{background:#f5c51820;color:#f5c518;border:1px solid #f5c51840}
+.empty{padding:40px;text-align:center;color:var(--muted);font-size:13px}
+
+.refresh-btn{padding:7px 16px;background:transparent;border:1px solid var(--border);
+  border-radius:8px;color:var(--muted);font-size:12px;cursor:pointer;transition:all .2s}
+.refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">🌍 VISITOR LOG</div>
+  <div class="nav">
+    <a href="/config">← Config</a>
+    <a href="/logout">Log out</a>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-val">{{ log | length }}</div>
+      <div class="stat-lbl">Total visits logged</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">{{ log | map(attribute='country') | unique | list | length }}</div>
+      <div class="stat-lbl">Unique countries</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val">{{ log | selectattr('path', 'equalto', '/') | list | length }}</div>
+      <div class="stat-lbl">Overlay views</div>
+    </div>
+  </div>
+
+  <!-- Country breakdown -->
+  {% if log %}
+  {% set country_counts = {} %}
+  {% for entry in log %}
+    {% if entry.country in country_counts %}
+      {% set _ = country_counts.update({entry.country: country_counts[entry.country] + 1}) %}
+    {% else %}
+      {% set _ = country_counts.update({entry.country: 1}) %}
+    {% endif %}
+  {% endfor %}
+  {% set sorted_countries = country_counts.items() | sort(attribute=1, reverse=True) | list %}
+  {% set max_count = sorted_countries[0][1] if sorted_countries else 1 %}
+
+  <div class="countries">
+    <div class="section-title" style="margin-bottom:16px">BY COUNTRY</div>
+    {% for country, count in sorted_countries[:10] %}
+    <div class="country-row">
+      <span class="country-name">{{ country }}</span>
+      <div class="country-bar-wrap">
+        <div class="country-bar" style="width:{{ (count / max_count * 100) | int }}%"></div>
+      </div>
+      <span class="country-count">{{ count }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- Log table -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <div class="section-title" style="margin-bottom:0">RECENT VISITS</div>
+    <button class="refresh-btn" onclick="location.reload()">⟳ Refresh</button>
+  </div>
+
+  <div class="log-card">
+    {% if log %}
+    <div class="log-header">
+      <span>Time (UTC)</span>
+      <span>Country</span>
+      <span>Page</span>
+    </div>
+    {% for entry in log %}
+    <div class="log-row">
+      <span class="log-time">{{ entry.time[11:19] }}<br><span style="font-size:10px;opacity:.5">{{ entry.time[:10] }}</span></span>
+      <span class="log-country">{{ entry.country }}</span>
+      <span>
+        {% if entry.path == "/" %}
+          <span class="badge badge-overlay">overlay</span>
+        {% elif entry.path == "/config" %}
+          <span class="badge badge-config">config</span>
+        {% else %}
+          <span class="badge badge-other">{{ entry.path[:18] }}</span>
+        {% endif %}
+      </span>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty">No visitors logged yet. The log fills up as people visit the overlay.</div>
+    {% endif %}
+  </div>
+
+</div>
+</body>
+</html>"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGIN HTML
@@ -507,7 +729,10 @@ input:checked+.slider:before{transform:translateX(18px)}
 
 <div class="topbar">
   <div class="brand">⬤ POKÉMON OVERLAY</div>
-  <a href="/logout" class="logout">Log out</a>
+  <div style="display:flex;gap:8px">
+    <a href="/visitors" class="logout">🌍 Visitors</a>
+    <a href="/logout" class="logout">Log out</a>
+  </div>
 </div>
 
 <div class="layout">
