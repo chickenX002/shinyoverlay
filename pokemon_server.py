@@ -25,6 +25,11 @@ import copy
 import os
 import collections
 from datetime import datetime, timezone
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+SLOVAK_TZ = ZoneInfo("Europe/Bratislava")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "pkmn-secret-change-me")
@@ -42,31 +47,37 @@ _ip_cache_lock = threading.Lock()
 SKIP_PATHS = {"/api/state", "/api/config", "/api/fetch",
               "/api/rotation", "/api/toggle_shiny", "/static"}
 
-def get_country(ip: str) -> str:
-    """Return country name for an IP using free ip-api.com (no key needed)."""
+def get_location(ip: str) -> dict:
+    """Return country, city for an IP using free ip-api.com (no key needed)."""
     if ip in ("127.0.0.1", "::1"):
-        return "Localhost"
+        return {"country": "Localhost", "city": "–"}
     with _ip_cache_lock:
         if ip in _ip_cache:
             return _ip_cache[ip]
     try:
-        r = req.get(f"http://ip-api.com/json/{ip}?fields=country,countryCode",
+        r = req.get(f"http://ip-api.com/json/{ip}?fields=country,city",
                     timeout=4)
         data = r.json()
-        country = data.get("country", "Unknown")
+        loc = {
+            "country": data.get("country", "Unknown"),
+            "city":    data.get("city", "–") or "–",
+        }
     except Exception:
-        country = "Unknown"
+        loc = {"country": "Unknown", "city": "–"}
     with _ip_cache_lock:
-        _ip_cache[ip] = country
-    return country
+        _ip_cache[ip] = loc
+    return loc
 
 def log_visitor_bg(ip: str, path: str):
-    country = get_country(ip)
+    loc = get_location(ip)
+    now_sk = datetime.now(SLOVAK_TZ)
     entry = {
         "ip":      ip,
-        "country": country,
+        "country": loc["country"],
+        "city":    loc["city"],
         "path":    path,
-        "time":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "time":    now_sk.strftime("%Y-%m-%d %H:%M:%S"),
+        "tz":      now_sk.strftime("%Z"),
     }
     with visitor_lock:
         visitor_log.appendleft(entry)
@@ -384,10 +395,10 @@ body{background:var(--bg);min-height:100vh;font-family:'DM Sans',sans-serif;colo
 
 /* ── Log table ── */
 .log-card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden}
-.log-header{display:grid;grid-template-columns:160px 1fr 140px;gap:0;
+.log-header{display:grid;grid-template-columns:130px 130px 1fr 100px 110px;gap:0;
   padding:12px 20px;background:#181c2a;border-bottom:1px solid var(--border)}
 .log-header span{font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
-.log-row{display:grid;grid-template-columns:160px 1fr 140px;gap:0;
+.log-row{display:grid;grid-template-columns:130px 130px 1fr 100px 110px;gap:0;
   padding:11px 20px;border-bottom:1px solid var(--border);transition:background .15s}
 .log-row:last-child{border-bottom:none}
 .log-row:hover{background:#181c2a}
@@ -471,21 +482,25 @@ body{background:var(--bg);min-height:100vh;font-family:'DM Sans',sans-serif;colo
   <div class="log-card">
     {% if log %}
     <div class="log-header">
-      <span>Time (UTC)</span>
+      <span>Time (SK)</span>
+      <span>IP Address</span>
       <span>Country</span>
+      <span>City</span>
       <span>Page</span>
     </div>
     {% for entry in log %}
     <div class="log-row">
       <span class="log-time">{{ entry.time[11:19] }}<br><span style="font-size:10px;opacity:.5">{{ entry.time[:10] }}</span></span>
+      <span class="log-time" style="font-size:11px;color:#60a5fa">{{ entry.ip }}</span>
       <span class="log-country">{{ entry.country }}</span>
+      <span class="log-time" style="font-size:12px;color:var(--text)">{{ entry.city }}</span>
       <span>
         {% if entry.path == "/" %}
           <span class="badge badge-overlay">overlay</span>
         {% elif entry.path == "/config" %}
           <span class="badge badge-config">config</span>
         {% else %}
-          <span class="badge badge-other">{{ entry.path[:18] }}</span>
+          <span class="badge badge-other">{{ entry.path[:14] }}</span>
         {% endif %}
       </span>
     </div>
